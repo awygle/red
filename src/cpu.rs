@@ -20,6 +20,9 @@ enum RegNames {
 #[repr(u8)]
 enum Flags {
     C = 0x01,
+    Z = 0x02,
+    V = 0x40,
+    N = 0x80,
 }
 
 struct Registers {
@@ -50,16 +53,21 @@ enum MicroFn {
     BranchSet(Flags),
     BranchClear(Flags),
     ReadTo(RegNames),
+    ReadAndUpdateFlags(RegNames),
     FetchTo(RegNames),
+    FetchAndUpdateFlags(RegNames),
     Write(RegNames),
     Push(RegNames),
+    Pull(RegNames),
     SetFlag(Flags),
     ClearFlag(Flags),
+    StepPC,
+    Test,
     Nop,
 }
 
 fn fetch_and_decode(cpu: &mut CPU, _: u8) {
-    let op = cpu.fetch_byte(cpu.get_pc());
+    let op = cpu.fetch_byte();
     let uops = &cpu.instruction_rom[op as usize]; // Vec<MicroFn>
     assert!(uops.len() > 0, format!("invalid instruction {:#X?}!", op));
     for uop in uops.into_iter().rev() {
@@ -69,7 +77,7 @@ fn fetch_and_decode(cpu: &mut CPU, _: u8) {
 }
 
 fn fetch_and_copy(cpu: &mut CPU, _: u8) {
-    cpu.regs.pch = cpu.fetch_byte(cpu.get_pc());
+    cpu.regs.pch = cpu.fetch_byte();
     cpu.regs.pcl = cpu.idl;
 }
 
@@ -79,56 +87,83 @@ impl From<MicroFn> for fn(&mut CPU, u8) {
             MicroFn::FetchAndDecode => fetch_and_decode,
             MicroFn::FetchAndCopy => fetch_and_copy,
             MicroFn::BranchSet(flag) => {
-                match flag {
-                    Flags::C => |cpu, _| {
-                        if cpu.regs.p & (Flags::C as u8) > 0 {
-                            let tmp_pc = (cpu.regs.pcl as u16) + (cpu.idl as u16);
-                            if tmp_pc & 0xFF00 != 0 {
-                                cpu.regs.pcl = tmp_pc as u8;
-                                cpu.regs.pch += 1;
-                                cpu.queue.push_front(MicroFn::FetchAndDecode);
-                                cpu.queue.push_front(MicroFn::Nop);
-                            }
-                            else {
-                                cpu.regs.pcl = tmp_pc as u8;
-                                cpu.queue.push_front(MicroFn::FetchAndDecode);
-                            }
+                let flagnum = flag as u8;
+                |cpu, flagnum| {
+                    if cpu.regs.p & flagnum != 0 {
+                        let tmp_pc = (cpu.regs.pcl as u16) + (cpu.idl as u16);
+                        if tmp_pc & 0xFF00 != 0 {
+                            cpu.regs.pcl = tmp_pc as u8;
+                            cpu.regs.pch += 1;
+                            cpu.queue.push_front(MicroFn::FetchAndDecode);
+                            cpu.queue.push_front(MicroFn::Nop);
                         }
                         else {
-                            fetch_and_decode(cpu, 0);
+                            cpu.regs.pcl = tmp_pc as u8;
+                            cpu.queue.push_front(MicroFn::FetchAndDecode);
                         }
+                    }
+                    else {
+                        fetch_and_decode(cpu, 0);
                     }
                 }
             },
             MicroFn::BranchClear(flag) => {
-                match flag {
-                    Flags::C => |cpu, _| {
-                        if cpu.regs.p & !(Flags::C as u8) == 0 {
-                            let tmp_pc = (cpu.regs.pcl as u16) + (cpu.idl as u16);
-                            if tmp_pc & 0xFF00 != 0 {
-                                cpu.regs.pcl = tmp_pc as u8;
-                                cpu.regs.pch += 1;
-                                cpu.queue.push_front(MicroFn::FetchAndDecode);
-                                cpu.queue.push_front(MicroFn::Nop);
-                            }
-                            else {
-                                cpu.regs.pcl = tmp_pc as u8;
-                                cpu.queue.push_front(MicroFn::FetchAndDecode);
-                            }
+                let flagnum = flag as u8;
+                |cpu, flagnum| {
+                    if cpu.regs.p & flagnum == 0 {
+                        let tmp_pc = (cpu.regs.pcl as u16) + (cpu.idl as u16);
+                        if tmp_pc & 0xFF00 != 0 {
+                            cpu.regs.pcl = tmp_pc as u8;
+                            cpu.regs.pch += 1;
+                            cpu.queue.push_front(MicroFn::FetchAndDecode);
+                            cpu.queue.push_front(MicroFn::Nop);
                         }
                         else {
-                            fetch_and_decode(cpu, 0);
+                            cpu.regs.pcl = tmp_pc as u8;
+                            cpu.queue.push_front(MicroFn::FetchAndDecode);
                         }
+                    }
+                    else {
+                        fetch_and_decode(cpu, 0);
                     }
                 }
             },
             MicroFn::FetchTo(regname) => {
                 let regnum = regname as u8;
-                |cpu, regnum| *cpu.get_reg_by_number(regnum) = cpu.fetch_byte(cpu.get_pc())
+                |cpu, regnum| *cpu.get_reg_by_number(regnum) = cpu.fetch_byte()
+            },
+            MicroFn::FetchAndUpdateFlags(regname) => {
+                println!("fetching to register {:?}", regname);
+                let regnum = regname as u8;
+                |cpu, regnum| {
+                    let loaded = cpu.fetch_byte();
+                    *cpu.get_reg_by_number(regnum) = loaded;
+                    if loaded == 0 {
+                        cpu.regs.p |= Flags::Z as u8;
+                    }
+                    if loaded & 0x80 != 0 {
+                        cpu.regs.p |= Flags::N as u8;
+                    }
+                    
+                }
             },
             MicroFn::ReadTo(regname) => {
                 let regnum = regname as u8;
-                |cpu, regnum| *cpu.get_reg_by_number(regnum) = cpu.fetch_byte(cpu.get_ab())
+                |cpu, regnum| *cpu.get_reg_by_number(regnum) = cpu.get_byte(cpu.get_ab())
+            },
+            MicroFn::ReadAndUpdateFlags(regname) => {
+                let regnum = regname as u8;
+                |cpu, regnum| {
+                    let loaded = cpu.get_byte(cpu.get_ab());
+                    *cpu.get_reg_by_number(regnum) = loaded;
+                    if loaded == 0 {
+                        cpu.regs.p |= Flags::Z as u8;
+                    }
+                    if loaded & 0x80 != 0 {
+                        cpu.regs.p |= Flags::N as u8;
+                    }
+                    
+                }
             },
             MicroFn::Write(regname) => {
                 let regnum = regname as u8;
@@ -142,8 +177,24 @@ impl From<MicroFn> for fn(&mut CPU, u8) {
                 |cpu, regnum| {
                     let val: u8 = *cpu.get_reg_by_number(regnum);
                     cpu.set_byte(cpu.regs.s as u16 + 0x100, val);
-                    cpu.regs.s.wrapping_sub(1);
+                    cpu.regs.s = cpu.regs.s.wrapping_sub(1);
                 }
+            },
+            MicroFn::Pull(regname) => {
+                let regnum = regname as u8;
+                |cpu, regnum| {
+                    cpu.regs.s = cpu.regs.s.wrapping_add(1);
+                    let val = cpu.get_byte(cpu.regs.s as u16 + 0x100);
+                    *cpu.get_reg_by_number(regnum) = val;
+                    println!("changed register {} to {:#X} (found at {})", regnum, val, cpu.regs.s as u16 + 0x100);
+                }
+            },
+            MicroFn::StepPC => |cpu, _| {
+                let tmp_pc = cpu.regs.pcl as u16 + 1;
+                if tmp_pc > 0xFF {
+                    cpu.regs.pch += 1;
+                }
+                cpu.regs.pcl = tmp_pc as u8;
             },
             MicroFn::SetFlag(flag) => {
                 let flagnum = flag as u8;
@@ -152,6 +203,12 @@ impl From<MicroFn> for fn(&mut CPU, u8) {
             MicroFn::ClearFlag(flag) => {
                 let flagnum = flag as u8;
                 |cpu, flagnum| cpu.regs.p &= !flagnum
+            },
+            MicroFn::Test => |cpu, _| {
+                let loaded = cpu.get_byte(cpu.get_ab());
+                let tmp_p = cpu.regs.p & 0x3D;
+                let zero = if loaded & cpu.regs.a == 0 { 0x02 } else { 0 };
+                cpu.regs.p = tmp_p | (loaded & 0xC0) | zero;
             },
             MicroFn::Nop => |_, _| {},
         }
@@ -162,12 +219,21 @@ const JMP_ABS :u8 = 0x4C;
 const LDX_IMM :u8 = 0xA2;
 const LDX_ABS :u8 = 0xAE;
 const STX_ZPG :u8 = 0x86;
+const STA_ZPG :u8 = 0x85;
+const BIT_ZPG :u8 = 0x24;
 const JSR :u8 = 0x20;
+const RTS :u8 = 0x60;
 const NOP :u8 = 0xEA;
 const SEC :u8 = 0x38;
 const CLC :u8 = 0x18;
 const BCS :u8 = 0xB0;
 const BCC :u8 = 0x90;
+const BEQ :u8 = 0xF0;
+const BNE :u8 = 0xD0;
+const BVS :u8 = 0x70;
+const BVC :u8 = 0x50;
+const BPL :u8 = 0x10;
+const LDA_IMM :u8 = 0xA9;
 
 impl CPU {
     fn instructions() -> Vec<Vec<MicroFn>> {
@@ -183,8 +249,14 @@ impl CPU {
             MicroFn::FetchAndDecode,
         ];
         
+        result[LDA_IMM as usize] = vec![ 
+            MicroFn::FetchAndUpdateFlags(RegNames::A),
+            // fetch and decode next instruction
+            MicroFn::FetchAndDecode,
+        ];
+        
         result[LDX_IMM as usize] = vec![ 
-            MicroFn::FetchTo(RegNames::X),
+            MicroFn::FetchAndUpdateFlags(RegNames::X),
             // fetch and decode next instruction
             MicroFn::FetchAndDecode,
         ];
@@ -194,6 +266,19 @@ impl CPU {
             MicroFn::FetchTo(RegNames::ABH),
             MicroFn::ReadTo(RegNames::X),
             // fetch and decode next instruction
+            MicroFn::FetchAndDecode,
+        ];
+        
+        result[BIT_ZPG as usize] = vec![ 
+            MicroFn::FetchTo(RegNames::ABL),
+            MicroFn::Test,
+            // fetch and decode next instruction
+            MicroFn::FetchAndDecode,
+        ];
+        
+        result[STA_ZPG as usize] = vec![
+            MicroFn::FetchTo(RegNames::ABL),
+            MicroFn::Write(RegNames::A),
             MicroFn::FetchAndDecode,
         ];
         
@@ -209,6 +294,15 @@ impl CPU {
             MicroFn::Push(RegNames::PCH),
             MicroFn::Push(RegNames::PCL),
             MicroFn::FetchAndCopy,
+            MicroFn::FetchAndDecode,
+        ];
+        
+        result[RTS as usize] = vec![
+            MicroFn::FetchTo(RegNames::IDL),
+            MicroFn::Nop,
+            MicroFn::Pull(RegNames::PCL),
+            MicroFn::Pull(RegNames::PCH),
+            MicroFn::StepPC,
             MicroFn::FetchAndDecode,
         ];
         
@@ -235,6 +329,31 @@ impl CPU {
         result[BCC as usize] = vec![
             MicroFn::FetchTo(RegNames::IDL),
             MicroFn::BranchClear(Flags::C),
+        ];
+        
+        result[BEQ as usize] = vec![
+            MicroFn::FetchTo(RegNames::IDL),
+            MicroFn::BranchSet(Flags::Z),
+        ];
+        
+        result[BNE as usize] = vec![
+            MicroFn::FetchTo(RegNames::IDL),
+            MicroFn::BranchClear(Flags::Z),
+        ];
+        
+        result[BVS as usize] = vec![
+            MicroFn::FetchTo(RegNames::IDL),
+            MicroFn::BranchSet(Flags::V),
+        ];
+        
+        result[BVC as usize] = vec![
+            MicroFn::FetchTo(RegNames::IDL),
+            MicroFn::BranchClear(Flags::V),
+        ];
+        
+        result[BPL as usize] = vec![
+            MicroFn::FetchTo(RegNames::IDL),
+            MicroFn::BranchClear(Flags::N),
         ];
         
         result
@@ -274,11 +393,18 @@ impl CPU {
     }
     
     pub fn get_byte(&self, addr: u16) -> u8 {
-        self.mapper.get_byte(addr)
+        if addr >= 0x4020 {
+            self.mapper.get_byte(addr)
+        }
+        else {
+            assert!(addr < 0x2000);
+            let effective_addr = addr & 0x7FF;
+            self.ram[effective_addr as usize]
+        }
     }
     
-    pub fn fetch_byte(&mut self, addr: u16) -> u8 {
-        let result = self.get_byte(addr);
+    pub fn fetch_byte(&mut self) -> u8 {
+        let result = self.get_byte(self.get_pc());
         if self.regs.pcl == 0xFF {
             self.regs.pch += 1;
             self.regs.pcl = 0;
@@ -301,6 +427,7 @@ impl CPU {
     }
     
     pub fn get_reg_by_number(&mut self, regnum: u8) -> &mut u8 {
+        println!("getting register number {}", regnum);
         match regnum {
             2 => &mut self.regs.pch,
             3 => &mut self.regs.pcl,
@@ -321,9 +448,12 @@ impl CPU {
         let arg;
         match uop {
             MicroFn::ReadTo(regname) => arg = regname as u8,
+            MicroFn::ReadAndUpdateFlags(regname) => arg = regname as u8,
             MicroFn::FetchTo(regname) => arg = regname as u8,
+            MicroFn::FetchAndUpdateFlags(regname) => arg = regname as u8,
             MicroFn::Write(regname) => arg = regname as u8,
             MicroFn::Push(regname) => arg = regname as u8,
+            MicroFn::Pull(regname) => arg = regname as u8,
             MicroFn::BranchSet(flag) => arg = flag as u8,
             MicroFn::BranchClear(flag) => arg = flag as u8,
             MicroFn::SetFlag(flag) => arg = flag as u8,
