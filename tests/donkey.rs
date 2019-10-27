@@ -11,7 +11,7 @@ extern crate slog;
 use slog::Drain;
 
 #[test]
-fn nestest() {
+fn donkey() {
     let log_path = "nestest.log";
     let file = OpenOptions::new()
       .create(true)
@@ -29,10 +29,10 @@ fn nestest() {
 
     let log = slog::Logger::root(drain, o!());
     
-    let path = "./nestest.nes";
+    let path = "./donkey.nes";
     let mut contents = read(path).unwrap();
-    contents[16+16*1024-3] = 0xC0;
-    contents[16+16*1024-4] = 0x00;
+    //contents[16+16*1024-3] = 0xC0;
+    //contents[16+16*1024-4] = 0x00;
     
     let rom = NesRom::from_bytes(&contents).unwrap();
     let mapper = create_mapper(rom);

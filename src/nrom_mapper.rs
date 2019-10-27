@@ -57,5 +57,9 @@ impl Mapper for NROM {
             self.prg_rom_upper[addr as usize - 0xC000]
         }
     }
+    
+    fn get_byte_ppu(&self, addr: u16) -> u8 {
+        unimplemented!();
+    }
 }
 

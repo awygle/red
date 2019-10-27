@@ -1,8 +1,12 @@
 use gumdrop::Options;
 
+#[macro_use]
+extern crate slog;
+
 pub mod ines;
 pub mod nrom_mapper;
 pub mod cpu;
+pub mod ppu;
 
 #[derive(Debug, Options)]
 struct RedOptions {

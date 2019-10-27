@@ -12,4 +12,7 @@ imgui = { version = "*" }
 imgui-glium-renderer = { version = "*" }
 imgui-winit-support = { version = "*" }
 gumdrop = "*"
+slog = "*"
+slog-term = "*"
+slog-async = "*"
 
