@@ -4,6 +4,7 @@ use imgui::{Context, FontConfig, FontGlyphRanges, FontSource, Ui};
 use imgui_glium_renderer::Renderer;
 use imgui_winit_support::{HiDpiMode, WinitPlatform};
 use std::time::Instant;
+use red::cpu::CPU;
 
 pub struct System {
     pub events_loop: glutin::EventsLoop,
@@ -73,8 +74,8 @@ pub fn init(title: &str) -> System {
 
 impl System {
     pub fn main_loop<
-        F: FnMut(&mut bool, &mut Ui, &mut Renderer)
-        >(self, mut run_ui: F) {
+        F: FnMut(&mut bool, &mut Ui, &mut Renderer, &mut CPU)
+        >(self, mut run_ui: F, mut cpu: CPU) {
         let System {
             mut events_loop,
             display,
@@ -105,7 +106,7 @@ impl System {
                 .expect("Failed to start frame");
             last_frame = io.update_delta_time(last_frame);
             let mut ui = imgui.frame();
-            run_ui(&mut run, &mut ui, &mut renderer);
+            run_ui(&mut run, &mut ui, &mut renderer, &mut cpu);
 
             let mut target = display.draw();
             target.clear_color_srgb(1.0, 1.0, 1.0, 1.0);

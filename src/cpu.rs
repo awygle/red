@@ -2,6 +2,7 @@ use crate::nrom_mapper::*;
 use std::collections::VecDeque;
 use slog::Logger;
 use std::rc::Rc;
+use std::cell::RefCell;
 use crate::ppu::*;
 
 #[derive(Copy, Clone, Debug)]
@@ -42,7 +43,7 @@ struct Registers {
 
 pub struct CPU {
     regs: Registers,
-    mapper: Rc<dyn Mapper>,
+    mapper: Rc<RefCell<dyn Mapper>>,
     idl: u8,
     abl: u8,
     abh: u8,
@@ -53,6 +54,12 @@ pub struct CPU {
     uop_logger: Logger,
     inst_logger: Logger,
     ppu: PPU,
+    dma_latch: u8,
+    dma_addr: u16,
+    cycle_count: usize,
+    nmi: bool,
+    nmi_last: bool,
+    nmi_occurred: bool,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -100,15 +107,37 @@ enum MicroFn {
     DecInMem,
     Test,
     Nop,
+    ReadDMA,
+    WriteDMA,
 }
 
 fn fetch_and_decode(cpu: &mut CPU, _: u8, _: u8) {
+    //println!("PC:{:04X} A:{:02X} X:{:02X} Y:{:02X} P:{:02X} SP:{:02X}", cpu.get_pc(), cpu.regs.a, cpu.regs.x, cpu.regs.y, cpu.regs.p & 0xCF | 0x20, cpu.regs.s);
+    if cpu.nmi && !cpu.nmi_last {
+        println!(">> NMI executing. P:{:#X}, PC:{:#X}, S:{:#X}", cpu.regs.p, cpu.get_pc(), cpu.regs.s);
+        // push status then address
+        cpu.set_byte(cpu.regs.s as u16 + 0x100, (cpu.get_pc() >> 8) as u8);
+        cpu.regs.s = cpu.regs.s.wrapping_sub(1);
+        cpu.set_byte(cpu.regs.s as u16 + 0x100, cpu.get_pc() as u8);
+        cpu.regs.s = cpu.regs.s.wrapping_sub(1);
+        cpu.set_byte(cpu.regs.s as u16 + 0x100, cpu.regs.p);
+        cpu.regs.s = cpu.regs.s.wrapping_sub(1);
+        
+        // jump to NMI handler
+        cpu.regs.pch = cpu.mapper.borrow().get_byte(0xFFFB);
+        cpu.regs.pcl = cpu.mapper.borrow().get_byte(0xFFFA);
+        cpu.queue.push_front(MicroFn::FetchAndDecode);
+        cpu.nmi_occurred = true;
+        cpu.nmi_last = cpu.nmi;
+        return;
+    }
+    cpu.nmi_last = cpu.nmi;
+    
     let op = cpu.fetch_byte();
     let uops = &cpu.instruction_rom[op as usize]; // Vec<MicroFn>
     assert!(uops.len() > 0, format!("invalid instruction {:#X?}!", op));
-    println!("\tDecoded instruction {:#X?} at PC {:#X?}", op, cpu.get_pc()-1);
+    //println!("Decoded operation {:#X}", op);
     for uop in uops.into_iter().rev() {
-        println!("adding uop {:?} to queue", *uop);
         cpu.queue.push_front(*uop);
     }
 }
@@ -121,42 +150,41 @@ fn fetch_and_copy(cpu: &mut CPU, _: u8, _: u8) {
 impl From<MicroFn> for fn(&mut CPU, u8, u8) {
     fn from(x: MicroFn) -> fn(&mut CPU, u8, u8) {
         match x {
+            MicroFn::ReadDMA => |cpu, _, _| {
+                cpu.dma_latch = cpu.get_byte(cpu.dma_addr);
+            },
+            MicroFn::WriteDMA => |cpu, _, _| {
+                cpu.ppu.write_oam(cpu.dma_addr as u8, cpu.dma_latch);
+                cpu.dma_addr += 1;
+            },
             MicroFn::FetchAndDecode => fetch_and_decode,
             MicroFn::FetchAndCopy => fetch_and_copy,
             MicroFn::ReadAndCopy => |cpu, _, _| {
-                println!("Address: {:#X}. IDL: {:#X}", cpu.get_ab(), cpu.idl);
                 let val = cpu.get_byte(cpu.get_ab());
-                println!("Fetched PCH {:#X} from address {:#X}", val, cpu.get_ab());
                 cpu.regs.pch = val;
                 cpu.regs.pcl = cpu.idl;
-                println!("PC is now {:#X}", cpu.get_pc());
             },
             MicroFn::BranchSet(flag) => {
                 let flagnum = flag as u8;
                 |cpu, flagnum, _| {
-                    println!("BranchSet: Status {:#X}, pc: {:#X}, idl: {:#X}", cpu.regs.p, cpu.get_pc(), cpu.idl);
                     if cpu.regs.p & flagnum != 0 {
                         let zext_pcl = cpu.regs.pcl as u16 as i16;
                         let sext_add = cpu.idl as i8 as i16;
                         let tmp_pcl = zext_pcl.wrapping_add(sext_add);
-                        println!("Branch taken. tmp_pcl: {:#X}", tmp_pcl);
                         if tmp_pcl < 0 {
                             cpu.regs.pcl = tmp_pcl as u8;
                             cpu.regs.pch -= 1;
-                            println!("Underflowed. New PC: {:#X}", cpu.get_pc());
                             cpu.queue.push_front(MicroFn::FetchAndDecode);
                             cpu.queue.push_front(MicroFn::Nop);
                         }
                         else if tmp_pcl > 0xFF {
                             cpu.regs.pcl = tmp_pcl as u8;
                             cpu.regs.pch += 1;
-                            println!("Overflowed. New PC: {:#X}", cpu.get_pc());
                             cpu.queue.push_front(MicroFn::FetchAndDecode);
                             cpu.queue.push_front(MicroFn::Nop);
                         }
                         else {
                             cpu.regs.pcl = tmp_pcl as u8;
-                            println!("No overflow. New PC: {:#X}", cpu.get_pc());
                             cpu.queue.push_front(MicroFn::FetchAndDecode);
                         }
                     }
@@ -168,29 +196,24 @@ impl From<MicroFn> for fn(&mut CPU, u8, u8) {
             MicroFn::BranchClear(flag) => {
                 let flagnum = flag as u8;
                 |cpu, flagnum, _| {
-                    println!("BranchClear: Status {:#X}, pc: {:#X}, idl: {:#X}", cpu.regs.p, cpu.get_pc(), cpu.idl);
                     if cpu.regs.p & flagnum == 0 {
                         let zext_pcl = cpu.regs.pcl as u16 as i16;
                         let sext_add = cpu.idl as i8 as i16;
                         let tmp_pcl = zext_pcl.wrapping_add(sext_add);
-                        println!("Branch taken. tmp_pcl: {:#X}", tmp_pcl);
                         if tmp_pcl < 0 {
                             cpu.regs.pcl = tmp_pcl as u8;
                             cpu.regs.pch -= 1;
-                            println!("Underflowed. New PC: {:#X}", cpu.get_pc());
                             cpu.queue.push_front(MicroFn::FetchAndDecode);
                             cpu.queue.push_front(MicroFn::Nop);
                         }
                         else if tmp_pcl > 0xFF {
                             cpu.regs.pcl = tmp_pcl as u8;
                             cpu.regs.pch += 1;
-                            println!("Overflowed. New PC: {:#X}", cpu.get_pc());
                             cpu.queue.push_front(MicroFn::FetchAndDecode);
                             cpu.queue.push_front(MicroFn::Nop);
                         }
                         else {
                             cpu.regs.pcl = tmp_pcl as u8;
-                            println!("No overflow. New PC: {:#X}", cpu.get_pc());
                             cpu.queue.push_front(MicroFn::FetchAndDecode);
                         }
                     }
@@ -203,12 +226,14 @@ impl From<MicroFn> for fn(&mut CPU, u8, u8) {
                 |cpu, _, _| {
                     cpu.abh = cpu.get_byte(cpu.get_ab());
                     cpu.abl = cpu.idl;
-                    let temp_addr = (cpu.abl as u16) + (cpu.regs.y as u16);
-                    if temp_addr > 0xFFu16 {
+                    let temp_abl = (cpu.abl as u16) + (cpu.regs.y as u16);
+                    if temp_abl > 0xFFu16 {
                         cpu.queue.push_front(MicroFn::Nop); // page-crossing cycle
                         let tmp_hiadd = (cpu.abh as u16) + 1u16;
                         cpu.abh = tmp_hiadd as u8;
                     }
+                    cpu.abl = temp_abl as u8;
+                    //println!("FetchIndirect effective address {:#X}", cpu.get_ab());
                 }
             },
             MicroFn::FetchTo(regname) => {
@@ -227,7 +252,6 @@ impl From<MicroFn> for fn(&mut CPU, u8, u8) {
                     let loaded = cpu.fetch_byte_from(addrnum);
                     let regval = *cpu.get_reg_by_number(regnum);
                     let val = regval.wrapping_sub(loaded);
-                    println!("Reg: {:#X?}, Fetched: {:#X?}, Result: {:#X?}", regval, loaded, val);
                     cpu.update_flag(Flags::C, regval >= val);
                     cpu.update_flag(Flags::Z, val == 0);
                     cpu.update_flag(Flags::N, val & 0x80 != 0);
@@ -250,7 +274,7 @@ impl From<MicroFn> for fn(&mut CPU, u8, u8) {
                     cpu.ram[cpu.get_ab() as usize] = val;
                     cpu.update_flag(Flags::Z, val == 0);
                     cpu.update_flag(Flags::N, val & 0x80 != 0);
-                    cpu.update_flag(Flags::C, oldval & 0x01 != 0);
+                    cpu.update_flag(Flags::C, oldval & 0x80 != 0);
                 }
             },
             MicroFn::Shr => {
@@ -314,12 +338,9 @@ impl From<MicroFn> for fn(&mut CPU, u8, u8) {
                 }
             },
             MicroFn::OrA(regname) => {
-                println!("Calling ORA with register {:?}", regname);
                 let regnum = regname as u8;
                 |cpu, regnum, _| {
-                    println!("Reading from address {:#X} for ORA", cpu.get_ab());
                     let loaded = cpu.fetch_byte_from(regnum);
-                    println!("ORing A = {:#X} with loaded value = {:#X}", cpu.regs.a, loaded);
                     let val = loaded | cpu.regs.a;
                     cpu.regs.a = val;
                     cpu.update_flag(Flags::Z, val == 0);
@@ -375,7 +396,6 @@ impl From<MicroFn> for fn(&mut CPU, u8, u8) {
                 }
             },
             MicroFn::FetchAndUpdateFlags(regname) => {
-                println!("fetching to register {:?}", regname);
                 let regnum = regname as u8;
                 |cpu, regnum, _| {
                     let loaded = cpu.fetch_byte();
@@ -392,6 +412,9 @@ impl From<MicroFn> for fn(&mut CPU, u8, u8) {
                 |cpu, regnum, _| {
                     let loaded = cpu.get_byte(cpu.get_ab());
                     *cpu.get_reg_by_number(regnum) = loaded;
+                    if regnum == RegNames::A as u8 {
+                        //println!("Writing {:#X} to A", loaded);
+                    }
                     cpu.update_flag(Flags::Z, loaded == 0);
                     cpu.update_flag(Flags::N, loaded & 0x80 != 0);
                     if regnum == RegNames::ABL as u8 {
@@ -403,20 +426,16 @@ impl From<MicroFn> for fn(&mut CPU, u8, u8) {
                 let toregnum = toreg as u8;
                 let fromregnum = fromreg as u8;
                 |cpu, toregnum, fromregnum| {
-                    println!("Reading from address {:#X}", cpu.idl);
                     let val = cpu.fetch_byte_from(fromregnum);
                     *cpu.get_reg_by_number(toregnum) = val;
                     if toregnum == RegNames::ABL as u8 {
                         cpu.abh = 0;
                     }
-                    println!("AB now {:#X}", cpu.get_ab());
-                    println!("IDL now {:#X}", cpu.idl);
                 }
             },
             MicroFn::ReadIncNoWrap(toreg) => {
                 let toregnum = toreg as u8;
                 |cpu, toregnum, fromregnum| {
-                    println!("Reading from address {:#X}", cpu.get_ab());
                     let val = cpu.get_byte(cpu.get_ab());
                     *cpu.get_reg_by_number(toregnum) = val;
                     let tmp_abl = (cpu.abl as u16) + 1u16;
@@ -424,14 +443,11 @@ impl From<MicroFn> for fn(&mut CPU, u8, u8) {
                     if toregnum == RegNames::ABL as u8 {
                         cpu.abh = 0;
                     }
-                    println!("AB now {:#X}", cpu.get_ab());
-                    println!("IDL now {:#X}", cpu.idl);
                 }
             },
             MicroFn::IndexWith(regname) => {
                 let regnum = regname as u8;
                 |cpu, regnum, _| {
-                    println!("indexing IDL = {:#X} with X = {:#X}", cpu.idl, cpu.regs.x);
                     cpu.idl = cpu.idl.wrapping_add(*cpu.get_reg_by_number(regnum));
                 }
             },
@@ -479,7 +495,9 @@ impl From<MicroFn> for fn(&mut CPU, u8, u8) {
                 let regnum = regname as u8;
                 |cpu, regnum, _| {
                     let val: u8 = *cpu.get_reg_by_number(regnum);
-                    println!("\t\tWriting value {:#X} to address {:#X}", val, cpu.get_ab());
+                    if cpu.get_ab() == 0x2007 {
+                    //println!("Writing to address {:#X}, value {:#X}, A {:#X}", cpu.get_ab(), val, cpu.regs.a);
+                    }
                     cpu.set_byte(cpu.get_ab(), val);
                 }
             },
@@ -497,7 +515,6 @@ impl From<MicroFn> for fn(&mut CPU, u8, u8) {
                     cpu.regs.s = cpu.regs.s.wrapping_add(1);
                     let val = cpu.get_byte(cpu.regs.s as u16 + 0x100);
                     *cpu.get_reg_by_number(regnum) = val;
-                    println!("changed register {} to {:#X} (found at {})", regnum, val, cpu.regs.s as u16 + 0x100);
                 }
             },
             MicroFn::PullWithFlags(regname) => {
@@ -508,7 +525,6 @@ impl From<MicroFn> for fn(&mut CPU, u8, u8) {
                     *cpu.get_reg_by_number(regnum) = val;
                     cpu.update_flag(Flags::Z, val == 0);
                     cpu.update_flag(Flags::N, val & 0x80 != 0);
-                    println!("changed register {} to {:#X} (found at {})", regnum, val, cpu.regs.s as u16 + 0x100);
                 }
             },
             MicroFn::StepPC => |cpu, _, _| {
@@ -578,7 +594,6 @@ impl From<MicroFn> for fn(&mut CPU, u8, u8) {
 fn add(cpu: &mut CPU, pre_a: u8, loaded: u8) {
     let val = (pre_a as u16).wrapping_add(loaded as u16).wrapping_add((cpu.regs.p as u16) & 0x01);
     cpu.regs.a = val as u8;
-    println!("Initial A: {:#X?}, Final A: {:#X?}, Fetched: {:#X?}, Result: {:#X?}", pre_a, cpu.regs.a, loaded, val);
     cpu.update_flag(Flags::Z, cpu.regs.a == 0);
     cpu.update_flag(Flags::N, cpu.regs.a & 0x80 != 0);
     cpu.update_flag(Flags::C, val > 0xFFu16);
@@ -689,7 +704,7 @@ const LDA_ABS_X :u8 = 0xBD;
 const LDA_ABS_Y :u8 = 0xB9;
 const LDA_IND_Y :u8 = 0xB1;
 const LDX_ABS :u8 = 0xAE;
-const LDX_ABS_X :u8 = 0xBE;
+const LDX_ABS_Y :u8 = 0xBE;
 const STA_ABS :u8 = 0x8D;
 const STA_ABS_X :u8 = 0x9D;
 const STA_ABS_Y :u8 = 0x99;
@@ -697,7 +712,7 @@ const STA_IND_X :u8 = 0x81;
 const STA_IND_Y :u8 = 0x91;
 const STX_ABS :u8 = 0x8E;
 const STX_ZPG :u8 = 0x86;
-const STX_ZPG_X :u8 = 0x96;
+const STX_ZPG_Y :u8 = 0x96;
 const STY_ZPG :u8 = 0x84;
 const STY_ZPG_X :u8 = 0x94;
 const STY_ABS :u8 = 0x8C;
@@ -756,7 +771,7 @@ const LDA_ZPG_X :u8 = 0xB5;
 const LDY_ZPG :u8 = 0xA4;
 const LDY_ZPG_X :u8 = 0xB4;
 const LDX_ZPG :u8 = 0xA6;
-const LDX_ZPG_X :u8 = 0xB6;
+const LDX_ZPG_Y :u8 = 0xB6;
 
 impl CPU {
     fn instructions() -> Vec<Vec<MicroFn>> {
@@ -817,14 +832,14 @@ impl CPU {
         
         result[LDX_ZPG as usize] = vec![ 
             MicroFn::FetchTo(RegNames::ABL),
-            MicroFn::ReadTo(RegNames::Y),
+            MicroFn::ReadTo(RegNames::X),
             // fetch and decode next instruction
             MicroFn::FetchAndDecode,
         ];
         
-        result[LDX_ZPG_X as usize] = vec![ 
-            MicroFn::FetchIndexNoWrap(RegNames::ABL, RegNames::X),
-            MicroFn::ReadTo(RegNames::Y),
+        result[LDX_ZPG_Y as usize] = vec![ 
+            MicroFn::FetchIndexNoWrap(RegNames::ABL, RegNames::Y),
+            MicroFn::ReadTo(RegNames::X),
             // fetch and decode next instruction
             MicroFn::FetchAndDecode,
         ];
@@ -855,7 +870,7 @@ impl CPU {
         
         result[LDA_IND_Y as usize] = vec![ 
             MicroFn::FetchTo(RegNames::ABL),
-            MicroFn::ReadAndIncrement(RegNames::IDL, RegNames::ABL),
+            MicroFn::ReadIncNoWrap(RegNames::IDL),
             MicroFn::FetchIndirect,
             MicroFn::ReadTo(RegNames::A),
             MicroFn::FetchAndDecode,
@@ -1043,7 +1058,7 @@ impl CPU {
         
         result[CMP_IND_Y as usize] = vec![ 
             MicroFn::FetchTo(RegNames::ABL),
-            MicroFn::ReadAndIncrement(RegNames::IDL, RegNames::ABL),
+            MicroFn::ReadIncNoWrap(RegNames::IDL),
             MicroFn::FetchIndirect,
             MicroFn::Cmp(RegNames::A, RegNames::ABL),
             MicroFn::FetchAndDecode,
@@ -1079,7 +1094,7 @@ impl CPU {
         
         result[AND_IND_Y as usize] = vec![ 
             MicroFn::FetchTo(RegNames::ABL),
-            MicroFn::ReadAndIncrement(RegNames::IDL, RegNames::ABL),
+            MicroFn::ReadIncNoWrap(RegNames::IDL),
             MicroFn::FetchIndirect,
             MicroFn::And(RegNames::ABL),
             MicroFn::FetchAndDecode,
@@ -1103,7 +1118,7 @@ impl CPU {
         
         result[ORA_IND_Y as usize] = vec![ 
             MicroFn::FetchTo(RegNames::ABL),
-            MicroFn::ReadAndIncrement(RegNames::IDL, RegNames::ABL),
+            MicroFn::ReadIncNoWrap(RegNames::IDL),
             MicroFn::FetchIndirect,
             MicroFn::OrA(RegNames::ABL),
             MicroFn::FetchAndDecode,
@@ -1395,7 +1410,7 @@ impl CPU {
         
         result[EOR_IND_Y as usize] = vec![ 
             MicroFn::FetchTo(RegNames::ABL),
-            MicroFn::ReadAndIncrement(RegNames::IDL, RegNames::ABL),
+            MicroFn::ReadIncNoWrap(RegNames::IDL),
             MicroFn::FetchIndirect,
             MicroFn::EOr(RegNames::ABL),
             MicroFn::FetchAndDecode,
@@ -1419,7 +1434,7 @@ impl CPU {
         
         result[ADC_IND_Y as usize] = vec![ 
             MicroFn::FetchTo(RegNames::ABL),
-            MicroFn::ReadAndIncrement(RegNames::IDL, RegNames::ABL),
+            MicroFn::ReadIncNoWrap(RegNames::IDL),
             MicroFn::FetchIndirect,
             MicroFn::Add(RegNames::ABL),
             MicroFn::FetchAndDecode,
@@ -1619,7 +1634,7 @@ impl CPU {
         
         result[SBC_IND_Y as usize] = vec![ 
             MicroFn::FetchTo(RegNames::ABL),
-            MicroFn::ReadAndIncrement(RegNames::IDL, RegNames::ABL),
+            MicroFn::ReadIncNoWrap(RegNames::IDL),
             MicroFn::FetchIndirect,
             MicroFn::Sub(RegNames::ABL),
             MicroFn::FetchAndDecode,
@@ -1633,9 +1648,9 @@ impl CPU {
             MicroFn::FetchAndDecode,
         ];
         
-        result[LDX_ABS_X as usize] = vec![ 
+        result[LDX_ABS_Y as usize] = vec![ 
             MicroFn::FetchTo(RegNames::ABL),
-            MicroFn::FetchAndIndex(RegNames::ABH, RegNames::X),
+            MicroFn::FetchAndIndex(RegNames::ABH, RegNames::Y),
             MicroFn::ReadTo(RegNames::X),
             // fetch and decode next instruction
             MicroFn::FetchAndDecode,
@@ -1687,7 +1702,7 @@ impl CPU {
         
         result[STA_IND_Y as usize] = vec![ 
             MicroFn::FetchTo(RegNames::ABL),
-            MicroFn::ReadAndIncrement(RegNames::IDL, RegNames::ABL),
+            MicroFn::ReadIncNoWrap(RegNames::IDL),
             MicroFn::FetchIndirect,
             MicroFn::Write(RegNames::A),
             MicroFn::FetchAndDecode,
@@ -1720,8 +1735,8 @@ impl CPU {
             MicroFn::FetchAndDecode,
         ];
         
-        result[STX_ZPG_X as usize] = vec![
-            MicroFn::FetchIndexNoWrap(RegNames::ABL, RegNames::X),
+        result[STX_ZPG_Y as usize] = vec![
+            MicroFn::FetchIndexNoWrap(RegNames::ABL, RegNames::Y),
             MicroFn::Write(RegNames::X),
             MicroFn::FetchAndDecode,
         ];
@@ -1741,7 +1756,7 @@ impl CPU {
         result[STY_ABS as usize] = vec![
             MicroFn::FetchTo(RegNames::ABL),
             MicroFn::FetchTo(RegNames::ABH),
-            MicroFn::Write(RegNames::X),
+            MicroFn::Write(RegNames::Y),
             // fetch and decode next instruction
             MicroFn::FetchAndDecode,
         ];
@@ -2037,8 +2052,8 @@ impl CPU {
         (self.abl as u16) | ((self.abh as u16) << 8)
     }
     
-    pub fn with_mapper(mapper: Rc<dyn Mapper>, logger: Logger) -> CPU {
-        let reset_vector = ((mapper.get_byte(0xFFFD) as u16) << 8) | (mapper.get_byte(0xFFFC) as u16);
+    pub fn with_mapper(mapper: Rc<RefCell<dyn Mapper>>, logger: Logger) -> CPU {
+        let reset_vector = ((mapper.borrow().get_byte(0xFFFD) as u16) << 8) | (mapper.borrow().get_byte(0xFFFC) as u16);
         let mut queue = VecDeque::new();
         queue.push_front(MicroFn::FetchAndDecode);
         
@@ -2068,6 +2083,12 @@ impl CPU {
             uop_logger,
             inst_logger,
             ppu,
+            dma_latch: 0,
+            dma_addr: 0,
+            cycle_count: 0,
+            nmi: false,
+            nmi_last: false,
+            nmi_occurred: false,
         }
     }
     
@@ -2075,12 +2096,16 @@ impl CPU {
         ((self.regs.pch as u16) << 8) | (self.regs.pcl as u16)
     }
     
-    pub fn get_byte(&self, addr: u16) -> u8 {
+    pub fn get_byte(&mut self, addr: u16) -> u8 {
         if addr >= 0x4020 {
-            self.mapper.get_byte(addr)
+            self.mapper.borrow().get_byte(addr)
         }
         else if addr >= 0x2000u16 && addr < 0x2008u16 {
             *self.ppu.get_reg(addr)
+        }
+        else if addr >= 0x4000u16 && addr < 0x4018u16 {
+            //println!("Read from unimplemented address {:#X}", addr);
+            return 0;
         }
         else {
             assert!(addr < 0x2000);
@@ -2132,12 +2157,34 @@ impl CPU {
     }
     
     pub fn set_byte(&mut self, addr: u16, value: u8) {
+        if addr == 2 || addr == 3 {
+            //println!("Write to address {} with value {}", addr, value);
+            //panic!();
+        }
         let effective_addr;
         if addr < 0x2000u16 {
             effective_addr = addr & 0x7FF;
         }
         else if addr >= 0x2000u16 && addr < 0x2008u16 {
             self.ppu.set_reg(addr, value);
+            return;
+        }
+        else if addr == 0x4014u16 {
+            // no actual write to PPU - port on CPU
+            for i in 0..256 {
+                self.queue.push_front(MicroFn::WriteDMA);
+                self.queue.push_front(MicroFn::ReadDMA);
+            }
+            self.queue.push_front(MicroFn::Nop);
+            // if odd cycle another NOP
+            if self.cycle_count & 1 > 0 {
+                self.queue.push_front(MicroFn::Nop);
+            }
+            self.dma_addr = (value as u16) << 8;
+            return;
+        }
+        else if addr >= 0x4000u16 && addr < 0x4018u16 {
+            //println!("Write to unimplemented address {:#X}", addr);
             return;
         }
         else {
@@ -2156,7 +2203,6 @@ impl CPU {
     }
     
     pub fn get_reg_by_number(&mut self, regnum: u8) -> &mut u8 {
-        println!("getting register number {}", regnum);
         match regnum {
             2 => &mut self.regs.pch,
             3 => &mut self.regs.pcl,
@@ -2173,80 +2219,80 @@ impl CPU {
     }
     
     pub fn execute(&mut self) {
-        let uop = self.queue.pop_front().unwrap();
-        let arg;
-        match uop {
-            MicroFn::ReadTo(regname) => arg = regname as u8,
-            MicroFn::FetchAndIndex(regname, _) => arg = regname as u8,
-            MicroFn::FetchIndexNoWrap(regname, _) => arg = regname as u8,
-            MicroFn::ReadAndIncrement(regname, _) => arg = regname as u8,
-            MicroFn::ReadIncNoWrap(regname) => arg = regname as u8,
-            MicroFn::IndexWith(regname) => arg = regname as u8,
-            MicroFn::Cmp(regname, _) => arg = regname as u8,
-            MicroFn::OrA(regname) => arg = regname as u8,
-            MicroFn::EOr(regname) => arg = regname as u8,
-            MicroFn::And(regname) => arg = regname as u8,
-            MicroFn::Add(regname) => arg = regname as u8,
-            MicroFn::Sub(regname) => arg = regname as u8,
-            MicroFn::ReadAndUpdateFlags(regname) => arg = regname as u8,
-            MicroFn::FetchTo(regname) => arg = regname as u8,
-            MicroFn::FetchAndUpdateFlags(regname) => arg = regname as u8,
-            MicroFn::Write(regname) => arg = regname as u8,
-            MicroFn::Increment(regname) => arg = regname as u8,
-            MicroFn::Decrement(regname) => arg = regname as u8,
-            MicroFn::Push(regname) => arg = regname as u8,
-            MicroFn::Pull(regname) => arg = regname as u8,
-            MicroFn::PullWithFlags(regname) => arg = regname as u8,
-            MicroFn::BranchSet(flag) => arg = flag as u8,
-            MicroFn::BranchClear(flag) => arg = flag as u8,
-            MicroFn::SetFlag(flag) => arg = flag as u8,
-            MicroFn::ClearFlag(flag) => arg = flag as u8,
-            MicroFn::Move(regname, _) => arg = regname as u8,
-            _ => arg = 0,
+        self.nmi_occurred = false;
+        while !self.nmi_occurred {
+            let uop = self.queue.pop_front().unwrap();
+            let arg;
+            match uop {
+                MicroFn::ReadTo(regname) => arg = regname as u8,
+                MicroFn::FetchAndIndex(regname, _) => arg = regname as u8,
+                MicroFn::FetchIndexNoWrap(regname, _) => arg = regname as u8,
+                MicroFn::ReadAndIncrement(regname, _) => arg = regname as u8,
+                MicroFn::ReadIncNoWrap(regname) => arg = regname as u8,
+                MicroFn::IndexWith(regname) => arg = regname as u8,
+                MicroFn::Cmp(regname, _) => arg = regname as u8,
+                MicroFn::OrA(regname) => arg = regname as u8,
+                MicroFn::EOr(regname) => arg = regname as u8,
+                MicroFn::And(regname) => arg = regname as u8,
+                MicroFn::Add(regname) => arg = regname as u8,
+                MicroFn::Sub(regname) => arg = regname as u8,
+                MicroFn::ReadAndUpdateFlags(regname) => arg = regname as u8,
+                MicroFn::FetchTo(regname) => arg = regname as u8,
+                MicroFn::FetchAndUpdateFlags(regname) => arg = regname as u8,
+                MicroFn::Write(regname) => arg = regname as u8,
+                MicroFn::Increment(regname) => arg = regname as u8,
+                MicroFn::Decrement(regname) => arg = regname as u8,
+                MicroFn::Push(regname) => arg = regname as u8,
+                MicroFn::Pull(regname) => arg = regname as u8,
+                MicroFn::PullWithFlags(regname) => arg = regname as u8,
+                MicroFn::BranchSet(flag) => arg = flag as u8,
+                MicroFn::BranchClear(flag) => arg = flag as u8,
+                MicroFn::SetFlag(flag) => arg = flag as u8,
+                MicroFn::ClearFlag(flag) => arg = flag as u8,
+                MicroFn::Move(regname, _) => arg = regname as u8,
+                _ => arg = 0,
+            }
+            let arg2;
+            match uop {
+                MicroFn::ReadTo(regname) => arg2 = 0,
+                MicroFn::ReadAndIncrement(_, regname) => arg2 = regname as u8,
+                MicroFn::FetchAndIndex(_, regname) => arg2 = regname as u8,
+                MicroFn::FetchIndexNoWrap(_, regname) => arg2 = regname as u8,
+                MicroFn::Cmp(_, regname) => arg2 = regname as u8,
+                MicroFn::ReadAndUpdateFlags(regname) => arg2 = 0,
+                MicroFn::FetchTo(regname) => arg2 = 0,
+                MicroFn::FetchAndUpdateFlags(regname) => arg2 = 0,
+                MicroFn::Write(regname) => arg2 = 0,
+                MicroFn::Increment(regname) => arg2 = 0,
+                MicroFn::Decrement(regname) => arg2 = 0,
+                MicroFn::Push(regname) => arg2 = 0,
+                MicroFn::Pull(regname) => arg2 = 0,
+                MicroFn::PullWithFlags(regname) => arg2 = 0,
+                MicroFn::BranchSet(flag) => arg2 = 0,
+                MicroFn::BranchClear(flag) => arg2 = 0,
+                MicroFn::SetFlag(flag) => arg2 = 0,
+                MicroFn::ClearFlag(flag) => arg2 = 0,
+                MicroFn::Move(_, regname) => arg2 = regname as u8,
+                _ => arg2 = 0,
+            }
+            
+            
+            let pc = self.get_pc();
+            //println!("PC: {:#X}, A: {:#X}, X: {:#X}, Y: {:#X}", pc, self.regs.a, self.regs.x, self.regs.y);
+            let ufn :fn(&mut CPU, u8, u8) = uop.into();
+            
+            (ufn)(self, arg, arg2);
+            
+            let nmi = self.ppu.run();
+            
+            self.nmi = nmi;
+            
+            self.cycle_count = self.cycle_count.wrapping_add(1);
         }
-        let arg2;
-        match uop {
-            MicroFn::ReadTo(regname) => arg2 = 0,
-            MicroFn::ReadAndIncrement(_, regname) => arg2 = regname as u8,
-            MicroFn::FetchAndIndex(_, regname) => arg2 = regname as u8,
-            MicroFn::FetchIndexNoWrap(_, regname) => arg2 = regname as u8,
-            MicroFn::Cmp(_, regname) => arg2 = regname as u8,
-            MicroFn::ReadAndUpdateFlags(regname) => arg2 = 0,
-            MicroFn::FetchTo(regname) => arg2 = 0,
-            MicroFn::FetchAndUpdateFlags(regname) => arg2 = 0,
-            MicroFn::Write(regname) => arg2 = 0,
-            MicroFn::Increment(regname) => arg2 = 0,
-            MicroFn::Decrement(regname) => arg2 = 0,
-            MicroFn::Push(regname) => arg2 = 0,
-            MicroFn::Pull(regname) => arg2 = 0,
-            MicroFn::PullWithFlags(regname) => arg2 = 0,
-            MicroFn::BranchSet(flag) => arg2 = 0,
-            MicroFn::BranchClear(flag) => arg2 = 0,
-            MicroFn::SetFlag(flag) => arg2 = 0,
-            MicroFn::ClearFlag(flag) => arg2 = 0,
-            MicroFn::Move(_, regname) => arg2 = regname as u8,
-            _ => arg2 = 0,
-        }
-        
-        let pc = self.get_pc();
-        //info!(self.inst_logger, "executing micro-op"; "uop" => ?uop, "pc" => %pc);
-        println!("executing micro-op {:?}. pc: {:#X}, a: {:#X}, x: {:#X}, y: {:#X}, s: {:#X}, p: {:#X}", 
-                 uop, 
-                 self.get_pc(),
-                 self.regs.a,
-                 self.regs.x,
-                 self.regs.y,
-                 self.regs.s,
-                 self.regs.p);
-        let ufn :fn(&mut CPU, u8, u8) = uop.into();
-        
-        (ufn)(self, arg, arg2);
-        println!("RAM address 0x81 is now {:#X}", self.ram[0x81]);
-        println!("RAM address 0x200 is now {:#X}", self.ram[0x200]);
-        
-        assert!(self.ram[0x002] == 0);
-        assert!(self.ram[0x003] == 0);
-        
-        self.ppu.run();
+        println!("Drawing framebuffer.");
+    }
+    
+    pub fn get_framebuffer(&self) -> &[u32] {
+        &self.ppu.framebuffer
     }
 }

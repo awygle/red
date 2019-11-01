@@ -89,7 +89,7 @@ impl INesHeader {
     }
     
     fn chr_rom_size_bytes(&self) -> usize {
-        self.prg_size as usize * 8*1024
+        self.chr_size as usize * 8*1024
     }
     
     fn mirrored_horizontal(&self) -> bool {

@@ -5,6 +5,7 @@ use red::ines::*;
 use red::nrom_mapper::*;
 use red::cpu;
 use std::rc::Rc;
+use std::cell::RefCell;
 
 #[macro_use]
 extern crate slog;
@@ -36,7 +37,7 @@ fn donkey() {
     
     let rom = NesRom::from_bytes(&contents).unwrap();
     let mapper = create_mapper(rom);
-    let mut cpu = cpu::CPU::with_mapper(Rc::new(mapper), log);
+    let mut cpu = cpu::CPU::with_mapper(Rc::new(RefCell::new(mapper)), log);
     
     println!("reset vector: {:#X}", cpu.get_pc());
     while true {
