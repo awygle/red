@@ -46,7 +46,7 @@ impl CustomTexturesApp {
                 data: Cow::Borrowed(data),
                 width: WIDTH as u32,
                 height: HEIGHT as u32,
-                format: ClientFormat::U32,
+                format: ClientFormat::U8U8U8U8,
             };
             let gl_texture = Texture2d::new(gl_ctx, raw)?;
             let texture_id = textures.insert(Rc::new(gl_texture));
@@ -60,7 +60,7 @@ impl CustomTexturesApp {
     fn show_textures(&self, ui: &Ui, renderer: &mut Renderer, cpu: &mut cpu::CPU) {
         renderer.textures();
         ui.window(im_str!("Hello textures"))
-            .size([640.0, 480.0], Condition::FirstUseEver)
+            .size([768.0, 768.0], Condition::FirstUseEver)
             .build(ui, || {
                 ui.text(im_str!("Hello textures!"));
                 
@@ -70,11 +70,11 @@ impl CustomTexturesApp {
                         data: Cow::Owned(cpu.get_framebuffer().into()),
                         width: WIDTH as u32,
                         height: HEIGHT as u32,
-                        format: ClientFormat::U32,
+                        format: ClientFormat::U8U8U8U8,
                     };
                     texture.write(glium::Rect { left: 0, bottom: 0, width: WIDTH as u32, height: HEIGHT as u32 }, raw);
                     ui.text("Some generated texture");
-                    Image::new(my_texture_id, [WIDTH as f32, HEIGHT as f32]).build(ui);
+                    Image::new(my_texture_id, [(WIDTH * 2) as f32, (HEIGHT * 2) as f32]).build(ui);
                 }
             });
         cpu.execute();

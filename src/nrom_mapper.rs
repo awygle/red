@@ -79,6 +79,9 @@ impl Mapper for NROM {
             self.palette_ram[(addr & 0x1Fu16) as usize]
         }
         else {
+            if addr >= 0x3000u16 {
+                println!("Accessing invalid address {:#X}", addr);
+            }
             assert!(addr < 0x3000u16);
             self.chr_ram[addr as usize - 0x2000]
         }

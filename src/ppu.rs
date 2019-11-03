@@ -8,33 +8,34 @@ use std::io::Write;
 use std::cell::Cell;
 
 const ntsc_lookup: [u8; 256] = [
-084, 084, 084, 000,  000, 030, 116, 000,  008, 016, 144, 000,  048, 000, 136, 000, 
-068, 000, 100, 000,  092, 000, 048, 000,  084, 004, 000, 000,  060, 024, 000, 000, 
-032, 042, 000, 000,  008, 058, 000, 000,  000, 064, 000, 000,  000, 060, 000, 000, 
-000, 050, 060, 000,  000, 000, 000, 000,  000, 000, 000, 000,  000, 000, 000, 000, 
-                                                                                   
-152, 150, 152, 000,  008, 076, 196, 000,  048, 050, 236, 000,  092, 030, 228, 000, 
-136, 020, 176, 000,  160, 020, 100, 000,  152, 034, 032, 000,  120, 060, 000, 000, 
-084, 090, 000, 000,  040, 114, 000, 000,  008, 124, 000, 000,  000, 118, 040, 000,     
-000, 102, 120, 000,  000, 000, 000, 000,  000, 000, 000, 000,  000, 000, 000, 000, 
-                                                                                   
-236, 238, 236, 000,  076, 154, 236, 000,  120, 124, 236, 000,  176, 098, 236, 000, 
-228, 084, 236, 000,  236, 088, 180, 000,  236, 106, 100, 000,  212, 136, 032, 000,   
-160, 170, 000, 000,  116, 196, 000, 000,  076, 208, 032, 000,  056, 204, 108, 000, 
-056, 180, 204, 000,  060, 060, 060, 000,  000, 000, 000, 000,  000, 000, 000, 000, 
-                                                                                   
-236, 238, 236, 000,  168, 204, 236, 000,  188, 188, 236, 000,  212, 178, 236, 000, 
-236, 174, 236, 000,  236, 174, 212, 000,  236, 180, 176, 000,  228, 196, 144, 000, 
-204, 210, 120, 000,  180, 222, 120, 000,  168, 226, 144, 000,  152, 226, 180, 000,   
-160, 214, 228, 000,  160, 162, 160, 000,  000, 000, 000, 000,  000, 000, 000, 000, 
+084, 084, 084, 255,  000, 030, 116, 255,  008, 016, 144, 255,  048, 000, 136, 255, 
+068, 000, 100, 255,  092, 000, 048, 255,  084, 004, 000, 255,  060, 024, 000, 255, 
+032, 042, 000, 255,  008, 058, 000, 255,  000, 064, 000, 255,  000, 060, 000, 255, 
+000, 050, 060, 255,  000, 000, 000, 255,  000, 000, 000, 255,  000, 000, 000, 255, 
+    
+152, 150, 152, 255,  008, 076, 196, 255,  048, 050, 236, 255,  092, 030, 228, 255, 
+136, 020, 176, 255,  160, 020, 100, 255,  152, 034, 032, 255,  120, 060, 000, 255, 
+084, 090, 000, 255,  040, 114, 000, 255,  008, 124, 000, 255,  000, 118, 040, 255,     
+000, 102, 120, 255,  000, 000, 000, 255,  000, 000, 000, 255,  000, 000, 000, 255, 
+    
+236, 238, 236, 255,  076, 154, 236, 255,  120, 124, 236, 255,  176, 098, 236, 255, 
+228, 084, 236, 255,  236, 088, 180, 255,  236, 106, 100, 255,  212, 136, 032, 255,   
+160, 170, 000, 255,  116, 196, 000, 255,  076, 208, 032, 255,  056, 204, 108, 255, 
+056, 180, 204, 255,  060, 060, 060, 255,  000, 000, 000, 255,  000, 000, 000, 255, 
+    
+236, 238, 236, 255,  168, 204, 236, 255,  188, 188, 236, 255,  212, 178, 236, 255, 
+236, 174, 236, 255,  236, 174, 212, 255,  236, 180, 176, 255,  228, 196, 144, 255, 
+204, 210, 120, 255,  180, 222, 120, 255,  168, 226, 144, 255,  152, 226, 180, 255,   
+160, 214, 228, 255,  160, 162, 160, 255,  000, 000, 000, 255,  000, 000, 000, 255, 
 ];
 
 struct BGState {
     op: BGOp,
-    tile: u16,
+    tile: i8,
     scanline: u16,
 }
 
+#[derive(Debug, PartialEq)]
 pub enum BGOp {
     WaitMem,
     Nop,
@@ -52,7 +53,7 @@ struct SpriteState {
     scanline: u16,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum SpriteOp {
     WaitMem,
     Nop,
@@ -66,6 +67,7 @@ pub enum SpriteOp {
     FetchAT,
     FetchSpriteLow,
     FetchSpriteHigh,
+    IncHoriz,
 }
 
 fn drawy_bits(ppu: &mut PPU, cycle: u16, scanline: u16) {
@@ -89,26 +91,53 @@ fn drawy_bits(ppu: &mut PPU, cycle: u16, scanline: u16) {
         return;
     }
     
+    
     // TODO add fine_x
     //println!("PLL:{:#X} PLH:{:#X} AL:{:#X}", 
     //         ppu.bg_pattern_latches[0],
     //         ppu.bg_pattern_latches[1],
-    //         ppu.bg_attribute_latches);
-    let bg_index_low = ppu.bg_pattern_latches[0] >> (cycle % 8) & 0x01;
-    let bg_index_high = ppu.bg_pattern_latches[1] >> (cycle % 8) & 0x01;
+    //         ppu.bg_attribute_latches
+             
+    // Background
+    let shift = (7 - ((cycle - 0) % 8));
+    let bg_index_low = ppu.bg_pattern_latches[0] >> shift & 0x01;
+    let bg_index_high = ppu.bg_pattern_latches[1] >> shift & 0x01;
     let bg_index = bg_index_low | (bg_index_high << 1);
-    let palette_index = ppu.bg_attribute_latches;
+    let palette_index = ppu.bg_attribute_latches[0];
     assert!(palette_index < 4);
     
-    // TODO add sprites + priority
+    // Sprites
+    for i in 0..8 {
+        //println!("Checking sprite {}", i);
+        let x = ppu.oam_xpos_regs[i] as u16;
+        if x <= cycle && x + 8 > cycle {
+            // sprite is active
+            println!("sprite {}, scanline {}, cycle {}, x {}", i, scanline, cycle, x);
+            let shift = cycle - x;
+            //println!("Using sprite address {:#X}", addr);
+            let low = ppu.oam_pattern_regs[i][0];
+            let high = ppu.oam_pattern_regs[i][1];
+            let low_bit = low >> (7 - shift) & 0x01;
+            let high_bit = high >> (7 - shift) & 0x01;
+            let sprite_index = low_bit | (high_bit << 1);
+            let sprite_palette = ppu.oam_attribute_regs[i] & 0x03;
+            let sprite_addr = sprite_addr(sprite_palette, sprite_index as u16);
+            let sprite_color_index = ppu.mapper.borrow().get_byte_ppu(sprite_addr);
+            let sprite_color = ppu.ntsc_to_rgb(sprite_color_index);
+            ppu.framebuffer[(cycle as usize)+(scanline as usize)*256] = sprite_color;
+            return;
+        }
+    }
+    
     let pixel_addr = pixel_addr(palette_index, bg_index);
     let pixel_color_index = ppu.mapper.borrow().get_byte_ppu(pixel_addr);
     let pixel_color = ppu.ntsc_to_rgb(pixel_color_index);
     
     //println!("Drawing cycle {} of scanline {}", cycle, scanline);
-    //println!("BG index: {}, palette index: {}, pixel addr: {}, pixel color: {}", bg_index, palette_index, pixel_addr, pixel_color);
+    if palette_index == 2 {
+    //println!("BG index: {}, palette index: {}, pixel addr: {:#X}, pixel index: {:#X}, pixel color: {:#X}, shift: {}", bg_index, palette_index, pixel_addr, pixel_color_index, pixel_color, shift);
+    }
     //println!("Rendering pixel at {}, color {:#X}", (cycle as usize)+(scanline as usize)*256, pixel_color);
-    assert!(pixel_color & 0xFF == 0);
     ppu.framebuffer[(cycle as usize)+(scanline as usize)*256] = pixel_color;
 }
 
@@ -121,28 +150,34 @@ fn pixel_addr(palette_index: u8, bg_index: u16) -> u16 {
     }
 }
 
-impl From<BGOp> for fn(&mut PPU, u16, u16) {
-    fn from(x: BGOp) -> fn(&mut PPU, u16, u16) {
+fn sprite_addr(palette_index: u8, sprite_index: u16) -> u16 {
+    if sprite_index == 0 {
+        0x3F00u16
+    }
+    else {
+        0x3F10u16 + ((palette_index as u16) * 4) + (sprite_index)
+    }
+}
+
+impl From<BGOp> for fn(&mut PPU, i8, u16) {
+    fn from(x: BGOp) -> fn(&mut PPU, i8, u16) {
         match x {
             BGOp::WaitMem => |_, _, _| {
             },
             BGOp::Nop => |ppu, _, scanline| {
-                println!("\t\tBG Nop, scanline {}", scanline);
-                //if scanline > 2 {
-                //    loop {}
-                //}
+                //println!("\t\tBG Nop, scanline {}, cycle {}", scanline, ppu.cycle_count);
                 if scanline < 240 || scanline == 261 {
                     ppu.queue.push_front(BGState {
                         op: BGOp::FetchNT,
-                        tile: 0,
+                        tile: 2,
                         scanline,
                     });
                 }
                 else {
-                    // No sprites on these scanlines
+                    // No pixels on these scanlines
                     ppu.queue.push_front(BGState {
                         op: BGOp::Nop,
-                        tile: 0,
+                        tile: 2,
                         scanline: (scanline + 1) % 262,
                     });
                     if scanline == 241 {
@@ -154,7 +189,7 @@ impl From<BGOp> for fn(&mut PPU, u16, u16) {
                         for i in (1..340).rev() {
                             ppu.queue.push_front(BGState {
                                 op: BGOp::WaitMem,
-                                tile: i, // this doesn't matter
+                                tile: 0, // this doesn't matter
                                 scanline,
                             });
                         }
@@ -162,7 +197,7 @@ impl From<BGOp> for fn(&mut PPU, u16, u16) {
                         for i in (1..341).rev() {
                             ppu.queue.push_front(BGState {
                                 op: BGOp::WaitMem,
-                                tile: i, // this doesn't matter
+                                tile: 0, // this doesn't matter
                                 scanline,
                             });
                         }
@@ -176,7 +211,7 @@ impl From<BGOp> for fn(&mut PPU, u16, u16) {
                 ppu.nmi_occurred = true;
             },
             BGOp::FetchNT => |ppu, tile, scanline| {
-                if scanline == 261 && tile == 0 {
+                if scanline == 261 && tile == 2 {
                     // clear vblank, sprite 0, overflow
                     ppu.ppustatus &= !0xE0;
                     // move out of reset, if applicable
@@ -189,9 +224,9 @@ impl From<BGOp> for fn(&mut PPU, u16, u16) {
                 let addr = base + (tile as u16) + (((scanline as u16)/ 8) * 32);
                 //println!("Fetching NT byte at address {:#X}", addr);
                 ppu.nametable_byte = ppu.mapper.borrow().get_byte_ppu(addr);
-                println!("NT == {:#X}, from address {:#X}, for tile {}", ppu.nametable_byte, addr, tile);
+                //println!("NT == {:#X}, from address {:#X}, for tile {}", ppu.nametable_byte, addr, tile);
                 //assert!(ppu.nametable_byte == 0x24 || ppu.nametable_byte == 0x00);
-                if tile == 42 {
+                if tile == -2 {
                     ppu.queue.push_front(BGState {
                         op: BGOp::FetchNT,
                         tile: tile+1,
@@ -203,11 +238,11 @@ impl From<BGOp> for fn(&mut PPU, u16, u16) {
                         scanline: scanline,
                     });
                 }
-                else if tile == 43 {
+                else if tile == -1 {
                     ppu.queue.push_front(BGState {
                         op: BGOp::Nop,
-                        tile: 0,
-                        scanline: ((scanline + 1) % 262),
+                        tile: 2,
+                        scanline: scanline,
                     });
                     ppu.queue.push_front(BGState {
                         op: BGOp::WaitMem,
@@ -230,13 +265,21 @@ impl From<BGOp> for fn(&mut PPU, u16, u16) {
             },
             BGOp::FetchAT => |ppu, tile, scanline| {
                 let base = 0x23C0u16;
-                let addr = base + ppu.nametable_byte as u16;
-                // if scanline % 16 < 8, bottom half of byte
-                // if tile % 2 == 0, low bits, else high bits
-                let bigshift = if scanline % 16 < 8 { 0 } else { 4 };
-                let smallshift = if tile % 2 == 0 { 0 } else { 2 };
-                ppu.attribute_latch = ppu.mapper.borrow().get_byte_ppu(addr) >> bigshift >> smallshift & 0x03;
-                //println!("scanline: {} tile: {} bigshift: {} smallshift: {} AT: {}", scanline, tile, bigshift, smallshift, ppu.attribute_latch);
+                if scanline < 240 && tile < 32 {
+                    //let addr = base + ((ppu.nametable_byte as u16) / 4);
+                    //let addr = base + ((tile as u16)/4) + (scanline as u16) / 4;
+                    let addr = base + (((scanline as u16) / 8 / 4)*8) + (tile as u16 / 4);
+                    // if scanline % 16 < 8, bottom half of byte
+                    // if tile % 2 == 0, low bits, else high bits
+                    let tile_x = tile;
+                    let tile_y = scanline / 8;
+                    let bigshift = if tile_y % 4 < 2 { 0 } else { 4 };
+                    let smallshift = if tile_x % 4 < 2 { 0 } else { 2 };
+                    let loaded = ppu.mapper.borrow().get_byte_ppu(addr);
+                    ppu.attribute_latch = (loaded >> (bigshift + smallshift)) & 0x03;
+                    //println!("addr: {:#X} loaded: {:#X} scanline: {} tile: {} bigshift: {} smallshift: {} AT: {}", addr, loaded, scanline, tile, bigshift, smallshift, ppu.attribute_latch);
+                    assert!(addr < 0x2400);
+                }
                 ppu.queue.push_front(BGState {
                     op: BGOp::FetchBGLow,
                     tile: tile,
@@ -251,8 +294,8 @@ impl From<BGOp> for fn(&mut PPU, u16, u16) {
             BGOp::FetchBGLow => |ppu, tile, scanline| {
                 let base = ppu.get_bg_base();
                 // TODO maybe multiply by 8 here? not sure
-                let addr = base + ppu.nametable_byte as u16 + scanline % 8;
-                //println!("Accessing address {:#X} for BG Low", addr);
+                let addr = base + ((ppu.nametable_byte as u16) * 16) + scanline % 8;
+                //println!("Accessing address {:#X} for BG Low, NT {:#X}, tile {}, scanline {}", addr, ppu.nametable_byte, tile, scanline);
                 ppu.bg_low_byte = ppu.mapper.borrow().get_byte_ppu(addr);
                 ppu.queue.push_front(BGState {
                     op: BGOp::FetchBGHigh,
@@ -267,7 +310,7 @@ impl From<BGOp> for fn(&mut PPU, u16, u16) {
             },
             BGOp::FetchBGHigh => |ppu, tile, scanline| {
                 let base = ppu.get_bg_base();
-                let addr = base + ppu.nametable_byte as u16 + 8 + scanline % 8;
+                let addr = base + ((ppu.nametable_byte as u16) * 16) + 8 + scanline % 8;
                 //println!("Accessing address {:#X} for BG High", addr);
                 ppu.bg_high_byte = ppu.mapper.borrow().get_byte_ppu(addr);
                 ppu.queue.push_front(BGState {
@@ -285,15 +328,16 @@ impl From<BGOp> for fn(&mut PPU, u16, u16) {
                 ppu.bg_pattern_latches[1] = ppu.bg_pattern_latches[1] >> 8;
                 ppu.bg_pattern_latches[1] |= (ppu.bg_high_byte as u16) << 8;
                 //println!("Loading shift registers with attribute data");
-                ppu.bg_attribute_latches = ppu.attribute_latch;
-                if tile == 32 {
+                ppu.bg_attribute_latches[0] = ppu.bg_attribute_latches[1];
+                ppu.bg_attribute_latches[1] = ppu.attribute_latch;
+                if tile == 33 {
                     // delay through HBLANK
                     ppu.queue.push_front(BGState {
                         op: BGOp::FetchNT,
-                        tile: 40,
-                        scanline,
+                        tile: 0,
+                        scanline: (scanline + 1) % 262,
                     });
-                    for i in (32..39).rev() {
+                    for i in (31..39).rev() {
                         ppu.queue.push_front(BGState {
                             op: BGOp::WaitMem,
                             tile: i+7, // this doesn't matter
@@ -336,6 +380,13 @@ impl From<BGOp> for fn(&mut PPU, u16, u16) {
                         });
                     }
                 }
+                else if tile == 1 {
+                    ppu.queue.push_front(BGState {
+                        op: BGOp::FetchNT,
+                        tile: -2,
+                        scanline: scanline,
+                    });
+                }
                 else {
                     ppu.queue.push_front(BGState {
                         op: BGOp::FetchNT,
@@ -353,7 +404,7 @@ impl From<SpriteOp> for fn(&mut PPU, u16, u16) {
         match x {
             SpriteOp::WaitMem => |_, _, _| {},
             SpriteOp::Nop => |ppu, cycle, scanline| {
-                //println!("\tSprite Nop, scanline {}", scanline);
+                println!("\tSprite Nop, scanline {}, cycle {}", scanline, ppu.cycle_count);
                 if scanline < 240 || scanline == 261 {
                 //if false {
                     ppu.sprite_queue.push_front(SpriteState {
@@ -423,14 +474,33 @@ impl From<SpriteOp> for fn(&mut PPU, u16, u16) {
                 ppu.oamaddr = 0;
             },
             SpriteOp::TestSprite => |ppu, cycle, scanline| {
+                //println!("TestSprite, cycle {}, scanline {}, sprite_index {}", cycle, scanline, ppu.sprite_index);
                 // reset oamaddr
                 ppu.oamaddr = 0;
                 let y_coord = ppu.oam_latch as u16;
-                if y_coord <= scanline + 1 && y_coord + ppu.get_sprite_height() > scanline + 1 {
-                    //println!("writing to offset {} in secondary OAM", ppu.sprite_offset);
-                    ppu.secondary_oam[ppu.sprite_count as usize] = ppu.oam_latch;
+                if ppu.sprite_index > 252 || cycle >= 253 {
+                    //println!("Done checking sprites, no overflow");
+                    ppu.sprite_index = 0;
+                    ppu.sprite_queue.push_front(SpriteState {
+                        op: SpriteOp::FetchNT,
+                        cycle: 257,
+                        scanline,
+                    });
+                    for i in (cycle+1..257).rev() {
+                        ppu.sprite_queue.push_front(SpriteState {
+                            op: SpriteOp::WaitMem,
+                            cycle: i,
+                            scanline,
+                        });
+                    }
+                }
+                else if y_coord <= scanline + 1 && y_coord + ppu.get_sprite_height() > scanline + 1 {
+                    //println!("Sprite hit, sprite_count {}", ppu.sprite_count);
+                    println!("writing {} to offset {} in secondary OAM", ppu.oam_latch - 1, ppu.sprite_offset);
+                    ppu.secondary_oam[ppu.sprite_count as usize] = ppu.oam_latch - 1;
                     ppu.sprite_offset += 1;
                     if ppu.sprite_count == 7 {
+                        //println!("Sprite count 7, checking overflow");
                         ppu.sprite_queue.push_front(SpriteState {
                             op: SpriteOp::CheckOverflow,
                             cycle: cycle + 8,
@@ -438,6 +508,7 @@ impl From<SpriteOp> for fn(&mut PPU, u16, u16) {
                         });
                     }
                     else {
+                        //println!("Sprite count !=7, continuing to check sprites");
                         ppu.sprite_queue.push_front(SpriteState {
                             op: SpriteOp::TestSprite,
                             cycle: cycle + 8,
@@ -480,22 +551,8 @@ impl From<SpriteOp> for fn(&mut PPU, u16, u16) {
                         scanline,
                     });
                 }
-                else if ppu.sprite_index > 252 {
-                    ppu.sprite_index = 0;
-                    ppu.sprite_queue.push_front(SpriteState {
-                        op: SpriteOp::FetchNT,
-                        cycle: 257,
-                        scanline,
-                    });
-                    for i in (cycle+1..257).rev() {
-                        ppu.sprite_queue.push_front(SpriteState {
-                            op: SpriteOp::WaitMem,
-                            cycle: i,
-                            scanline,
-                        });
-                    }
-                }
                 else {
+                    //println!("No sprite hit");
                     ppu.sprite_index += 3;
                     ppu.sprite_queue.push_front(SpriteState {
                         op: SpriteOp::TestSprite,
@@ -513,7 +570,7 @@ impl From<SpriteOp> for fn(&mut PPU, u16, u16) {
                 // reset oamaddr
                 ppu.oamaddr = 0;
                 let offset = ppu.sprite_offset as usize;
-                //println!("writing to offset {} in secondary OAM, sprite {}", offset, ppu.sprite_count);
+                println!("writing {} to offset {} in secondary OAM, sprite {}", ppu.oam_latch, offset, ppu.sprite_count);
                 ppu.secondary_oam[((ppu.sprite_count as usize) * 4) + offset] = ppu.oam_latch;
                 ppu.sprite_offset += 1;
                 if ppu.sprite_offset == 4 {
@@ -651,11 +708,20 @@ impl From<SpriteOp> for fn(&mut PPU, u16, u16) {
                 // reset oamaddr
                 ppu.oamaddr = 0;
                 ////println!("fetching sprite low on cycle {}", cycle);
-                let base = ppu.get_sprite_base();
-                ////println!("accessing byte {} from secondary OAM", (ppu.sprite_index as usize * 4) + 1);
-                let index = ppu.secondary_oam[(ppu.sprite_index as usize * 4) + 1];
-                let addr = base + (index as u16) * 8;
-                ppu.sprite_low_byte = ppu.mapper.borrow().get_byte_ppu(addr);
+                let sprite_index = ppu.sprite_index as usize;
+                let y_start = ppu.secondary_oam[sprite_index*4];
+                if y_start < 0xEF {
+                    let tile_index = (ppu.secondary_oam[sprite_index*4+1] as u16);
+                    let y_offset = (scanline) - (ppu.secondary_oam[sprite_index*4] as u16);
+                    let addr = ppu.get_sprite_base() + ((tile_index as u16) * 16) + y_offset;
+                    ////println!("accessing byte {} from secondary OAM", (ppu.sprite_index as usize * 4) + 1);
+                    println!("sprite {}, scanline {}, cycle {},  y_start {}, y_offset {}, tile_index {}", sprite_index, scanline, cycle, ppu.secondary_oam[sprite_index*4], y_offset, tile_index);
+                    ppu.sprite_low_byte = ppu.mapper.borrow().get_byte_ppu(addr);
+                }
+                else {
+                    // transparent
+                    ppu.sprite_low_byte = 0;
+                }
                 ppu.sprite_queue.push_front(SpriteState {
                     op: SpriteOp::FetchSpriteHigh,
                     cycle: cycle + 2,
@@ -671,13 +737,20 @@ impl From<SpriteOp> for fn(&mut PPU, u16, u16) {
                 // reset oamaddr
                 ppu.oamaddr = 0;
                 ////println!("fetching sprite high on cycle {}", cycle);
-                let base = ppu.get_sprite_base();
-                ////println!("accessing byte {} from secondary OAM", (ppu.sprite_index as usize * 4) + 1);
-                let index = ppu.secondary_oam[(ppu.sprite_index as usize * 4) + 1];
-                let addr = base + (index as u16) * 8 + 8;
-                ppu.sprite_low_byte = ppu.mapper.borrow().get_byte_ppu(addr);
-                ppu.sprite_index += 1;
-                if ppu.sprite_index >= 8 {
+                let sprite_index = ppu.sprite_index as usize;
+                let y_start = ppu.secondary_oam[sprite_index*4];
+                if y_start < 0xEF {
+                    let tile_index = (ppu.secondary_oam[sprite_index*4+1] as u16);
+                    let y_offset = (scanline) - (ppu.secondary_oam[sprite_index*4] as u16);
+                    let addr = ppu.get_sprite_base() + ((tile_index as u16) * 16) + y_offset + 8;
+                    ////println!("accessing byte {} from secondary OAM", (ppu.sprite_index as usize * 4) + 1);
+                    ppu.sprite_high_byte = ppu.mapper.borrow().get_byte_ppu(addr);
+                }
+                else {
+                    // transparent
+                    ppu.sprite_high_byte = 0;
+                }
+                if ppu.sprite_index >= 7 {
                     assert_eq!(cycle, 319);
                     ppu.sprite_index = 0;
                     ppu.sprite_count = 0;
@@ -702,11 +775,20 @@ impl From<SpriteOp> for fn(&mut PPU, u16, u16) {
                         scanline: scanline,
                     });
                     ppu.sprite_queue.push_front(SpriteState {
-                        op: SpriteOp::WaitMem,
+                        op: SpriteOp::IncHoriz,
                         cycle: cycle + 1,
                         scanline: scanline,
                     });
                 }
+            },
+            SpriteOp::IncHoriz => |ppu, cycle, scanline| {
+                let sprite_index = ppu.sprite_index as usize;
+                ppu.oam_pattern_regs[sprite_index][0] = ppu.sprite_low_byte;
+                ppu.oam_pattern_regs[sprite_index][1] = ppu.sprite_high_byte;
+                ppu.oam_attribute_regs[sprite_index] = ppu.secondary_oam[sprite_index*4+2];;
+                ppu.oam_xpos_regs[sprite_index] = ppu.secondary_oam[sprite_index*4+3];
+                ppu.sprite_index += 1;
+                //println!("sprite_index is now {}", ppu.sprite_index);
             },
         }
     }
@@ -728,6 +810,9 @@ pub struct PPU {
     sprite_queue: VecDeque<SpriteState>,
     oam: [u8; 256],
     secondary_oam: [u8; 32],
+    oam_pattern_regs: [[u8; 2]; 8],
+    oam_attribute_regs: [u8; 8],
+    oam_xpos_regs: [u8; 8],
     
     initialized: bool,
     nametable_byte: u8,
@@ -745,7 +830,7 @@ pub struct PPU {
     cycle_count: usize,
     
     bg_pattern_latches: [u16; 2],
-    bg_attribute_latches: u8,
+    bg_attribute_latches: [u8; 2],
     
     pub framebuffer: Vec<u32>,
     
@@ -868,14 +953,13 @@ impl PPU {
                     self.latch_low = value;
                     self.latch_cleared.set(true);
                 }
-                println!("Write to PPUADDR. New latch value is {:#X}", self.get_latch());
+                //println!("Write to PPUADDR. New latch value is {:#X}", self.get_latch());
             },
             7 => {
                 if self.get_latch() == 0x2350 {
-                    println!("Write {:#X} to PPUDATA at {:#X}", value, self.get_latch());
+                    //println!("Write {:#X} to PPUDATA at {:#X}", value, self.get_latch());
                     if value != 0x24 && value != 0x12 {
-                        println!("Current PPU cycle: {}", self.cycle_count);
-                        loop {}
+                        //println!("Current PPU cycle: {}", self.cycle_count);
                         //panic!();
                     }
                 }
@@ -904,14 +988,14 @@ impl PPU {
         let mut queue = VecDeque::new();
         queue.push_front(BGState {
             op: BGOp::Nop,
-            tile: 0,
-            scanline: 0,
+            tile: 2,
+            scanline: 261,
         });
         let mut sprite_queue = VecDeque::new();
         sprite_queue.push_front(SpriteState {
             op: SpriteOp::Nop,
             cycle: 0,
-            scanline: 0,
+            scanline: 261,
         });
         let mut framebuffer = Vec::with_capacity(61440);
         framebuffer.resize_with(61440, || 0);
@@ -932,6 +1016,9 @@ impl PPU {
             oam: [0; 256],
             secondary_oam: [0; 32],
             initialized: false,
+            oam_pattern_regs: [[0; 2]; 8],
+            oam_attribute_regs: [0; 8],
+            oam_xpos_regs: [0; 8],
             nametable_byte: 0,
             attribute_latch: 0,
             bg_low_byte: 0,
@@ -944,7 +1031,7 @@ impl PPU {
             sprite_high_byte: 0,
             cycle_count: 0,
             bg_pattern_latches: [0; 2],
-            bg_attribute_latches: 0,
+            bg_attribute_latches: [0; 2],
             framebuffer,
             ntsc_lookup,
             nmi_occurred: false,
@@ -955,7 +1042,7 @@ impl PPU {
         let mut color = 0u32;
         for i in 0..4 {
             // color in RGBA format
-            color |= (self.ntsc_lookup[((ntsc_byte * 4) + i) as usize] as u32) << (24 - (i*8));
+            color |= (self.ntsc_lookup[((ntsc_byte * 4) + i) as usize] as u32) << (i*8);
             //println!("Color now {:#X}", color);
         }
         color
@@ -975,10 +1062,18 @@ impl PPU {
             let sprite_state = self.sprite_queue.pop_front().unwrap();
             let sprite_uop = sprite_state.op;
             
+            if sprite_uop == SpriteOp::Nop {
+                if uop != BGOp::Nop || state.scanline != sprite_state.scanline {
+                    println!("Failure on PPU cycle {}", self.cycle_count);
+                    //panic!();
+                }
+            }
+            //println!("\tDispatching BG uop {:?}", uop);
+            let ufn :fn(&mut PPU, i8, u16) = uop.into();
+            (ufn)(self, state.tile, state.scanline);
             drawy_bits(self, sprite_state.cycle, sprite_state.scanline);
             
-            let ufn :fn(&mut PPU, u16, u16) = uop.into();
-            (ufn)(self, state.tile, state.scanline);
+            
             
             //println!("\tDispatching sprite uop {:?}", sprite_uop);
             let ufn :fn(&mut PPU, u16, u16) = sprite_uop.into();
@@ -990,9 +1085,9 @@ impl PPU {
                 nmi = true;
             }
             
-            //if self.cycle_count > 128_000_000 {
-            //    for i in 0x2000..0x2400 {
-            //        println!("CHR {:#X}: {:#X}.", 
+            //if self.cycle_count > 500_000 {
+            //    for i in 0x23C0..0x2400 {
+            //        println!("AT {:#X}: {:#X}.", 
             //            i,
             //            self.mapper.borrow().get_byte_ppu(i));
             //    }

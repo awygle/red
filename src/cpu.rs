@@ -2290,6 +2290,7 @@ impl CPU {
             self.cycle_count = self.cycle_count.wrapping_add(1);
         }
         println!("Drawing framebuffer.");
+        
     }
     
     pub fn get_framebuffer(&self) -> &[u32] {
